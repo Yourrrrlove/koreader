@@ -20,9 +20,11 @@ To get and compile the source you must have:
 - `gcc/g++` or `clang/clang++`: with C11 & C++17 support
 - `git`
 - `make`: version 4.1 or greater
+- `meson`: version 1.2.0 or greater
 - `nasm`
 - `ninja`: optional, but recommended
 - `patch`
+- `perl`: version 5 or greater
 - `pkg-config` or `pkgconf`
 - `unzip`
 - `wget`
@@ -40,8 +42,8 @@ Install the prerequisites using apk:
 ```
 sudo apk add autoconf automake bash cmake coreutils curl diffutils g++ \
     gcc gettext-dev git grep gzip libtool linux-headers lua5.1-busted \
-    luarocks5.1 make ninja-build ninja-is-really-ninja patch pkgconf \
-    procps-ng sdl2 tar unzip wget
+    luarocks5.1 make meson ninja-build ninja-is-really-ninja patch \
+    perl pkgconf procps-ng sdl2 tar unzip wget
 ```
 
 ### Arch Linux
@@ -50,7 +52,7 @@ Install the prerequisites using pacman:
 
 ```
 run0 pacman -S base-devel ca-certificates cmake gcc-libs git \
-    lua51-busted luarocks nasm ninja sdl2 unzip wget
+    lua51-busted luarocks meson nasm ninja perl sdl2 unzip wget
 ```
 
 ### Debian/Ubuntu
@@ -60,7 +62,7 @@ Install the prerequisites using APT:
 ```
 sudo apt-get install autoconf automake build-essential ca-certificates cmake \
     gcc-multilib gettext git libsdl2-2.0-0 libtool libtool-bin lua-busted \
-    lua5.1 luarocks nasm ninja-build patch pkg-config unzip wget
+    lua5.1 luarocks meson nasm ninja-build patch perl pkg-config unzip wget
 ```
 
 ### Fedora/Red Hat
@@ -69,8 +71,8 @@ Install the prerequisites using DNF:
 
 ```
 sudo dnf install autoconf automake cmake gettext gcc gcc-c++ git libtool \
-    lua5.1 luarocks nasm ninja-build patch perl-FindBin procps-ng SDL2 \
-    unzip wget
+    lua5.1 luarocks meson nasm ninja-build patch perl-FindBin procps-ng \
+    SDL2 unzip wget
 ```
 
 And for busted:
@@ -83,15 +85,14 @@ luarocks --lua-version=5.1 --local install busted
 Install the prerequisites using [Homebrew](https://brew.sh/):
 
 ```
-brew install autoconf automake binutils cmake coreutils gettext \
-    gnu-getopt grep libtool make nasm ninja pkg-config sdl2 wget
+brew install autoconf automake binutils cmake coreutils findutils gnu-getopt \
+    libtool make meson nasm ninja p7zip pkg-config sdl2 util-linux
 ```
 
-You will also have to ensure Homebrew's gettext, gnu-getopt, grep are in your path, e.g., via
+You will also have to ensure Homebrew's findutils, gnu-getopt, make & util-linux are in your path, e.g., via
 ```
-export PATH="$(brew --prefix)/opt/gettext/bin:$(brew --prefix)/opt/gnu-getopt/bin:$(brew --prefix)/opt/grep/libexec/gnubin:${PATH}"
+export PATH="$(brew --prefix)/opt/findutils/libexec/gnubin:$(brew --prefix)/opt/gnu-getopt/bin:$(brew --prefix)/opt/make/libexec/gnubin:$(brew --prefix)/opt/util-linux/bin:${PATH}"
 ```
-See also `brew info gettext` for details on how to make that permanent in your shell.
 
 In the same vein, if that's not already the case, you probably also want to make sure Homebrew's stuff takes precedence:
 ```

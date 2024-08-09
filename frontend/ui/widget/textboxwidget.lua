@@ -36,6 +36,7 @@ local Screen = require("device").screen
 local TextBoxWidget = InputContainer:extend{
     text = nil,
     editable = false, -- Editable flag for whether drawing the cursor or not.
+    select_mode = nil, -- select mode in InputText, wider cursor line
     justified = false, -- Should text be justified (spaces widened to fill width)
     alignment = "left", -- or "center", "right"
     dialog = nil, -- parent dialog that will be set dirty
@@ -150,7 +151,7 @@ function TextBoxWidget:init()
 
     self.cursor_line = LineWidget:new{
         dimen = Geom:new{
-            w = Size.line.medium,
+            w = self.select_mode and 3*Size.line.medium or Size.line.medium,
             h = self.line_height_px,
         }
     }
@@ -1885,7 +1886,7 @@ function TextBoxWidget:moveCursorDown()
 end
 
 function TextBoxWidget:moveCursorHome()
-    self:moveCursorToCharPos(self.vertical_string_list[self.current_line_num].offset)
+    self:moveCursorToCharPos(self.vertical_string_list[self.current_line_num] and self.vertical_string_list[self.current_line_num].offset or #self.charlist)
 end
 
 function TextBoxWidget:moveCursorEnd()

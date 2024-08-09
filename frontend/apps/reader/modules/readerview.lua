@@ -264,10 +264,6 @@ function ReaderView:paintTo(bb, x, y)
     if self.ui.paging then
         if self.document.hw_dithering then
             self.dialog.dithered = true
-            -- Assume we're going to be showing colorful stuff on kaleido panels...
-            if Device:hasKaleidoWfm() then
-                UIManager:setDirty(nil, "color")
-            end
         end
     else
         -- Whereas for CRe,
@@ -278,14 +274,13 @@ function ReaderView:paintTo(bb, x, y)
         -- Which is why we remember the stats of the *previous* page.
         self.img_count, self.img_coverage = img_count, img_coverage
         if img_coverage >= 0.075 or coverage_diff >= 0.075 then
-            self.dialog.dithered = true
+            -- Request dithering on the actual page with image content
+            if img_coverage >= 0.075 then
+                self.dialog.dithered = true
+            end
             -- Request a flashing update while we're at it, but only if it's the first time we're painting it
             if self.state.drawn == false and G_reader_settings:nilOrTrue("refresh_on_pages_with_images") then
                 UIManager:setDirty(nil, "full")
-            end
-            -- On Kaleido panels, we'll want to use GCC16 on the actual image, always...
-            if Device:hasKaleidoWfm() and img_coverage >= 0.075 then
-                UIManager:setDirty(nil, "color")
             end
         end
         self.state.drawn = true
@@ -382,8 +377,7 @@ function ReaderView:drawScrollPages(bb, x, y)
             state.page,
             state.zoom,
             state.rotation,
-            state.gamma,
-            self.render_mode)
+            state.gamma)
         pos.y = pos.y + state.visible_area.h
         -- draw page gap if not the last part
         if page ~= #self.page_states then
@@ -457,8 +451,7 @@ function ReaderView:drawSinglePage(bb, x, y)
         self.state.page,
         self.state.zoom,
         self.state.rotation,
-        self.state.gamma,
-        self.render_mode)
+        self.state.gamma)
     UIManager:nextTick(self.emitHintPageEvent)
 end
 
@@ -870,6 +863,7 @@ function ReaderView:onReadSettings(config)
     if self.ui.paging then
         self.document:setTileCacheValidity(config:readSetting("tile_cache_validity_ts"))
         self.render_mode = config:readSetting("render_mode") or G_defaults:readSetting("DRENDER_MODE")
+        self.document.render_mode = self.render_mode
         if config:has("gamma") then -- old doc contrast setting
             config:saveSetting("kopt_contrast", config:readSetting("gamma"))
             config:delSetting("gamma")
@@ -928,6 +922,7 @@ function ReaderView:onBBoxUpdate(bbox)
     self.use_bbox = bbox and true or false
 end
 
+--- @note: From ReaderRotation, which is broken and disabled.
 function ReaderView:onRotationUpdate(rotation)
     self.state.rotation = rotation
     self:recalculate()
@@ -1060,7 +1055,12 @@ function ReaderView:getRenderModeMenuTable()
         return {
             text = text,
             checked_func = function() return view.render_mode == mode end,
-            callback = function() view.render_mode = mode end,
+            callback = function()
+                view.render_mode = mode
+                view.document.render_mode = mode
+                view:recalculate()
+                UIManager:broadcastEvent(Event:new("RenderingModeUpdate"))
+            end,
         }
     end
     return  {
@@ -1143,21 +1143,21 @@ end
 
 function ReaderView:getTapZones()
     local forward_zone, backward_zone
+    local DTAP_ZONE_FORWARD = G_defaults:readSetting("DTAP_ZONE_FORWARD")
+    local DTAP_ZONE_BACKWARD = G_defaults:readSetting("DTAP_ZONE_BACKWARD")
     local tap_zones_type = G_reader_settings:readSetting("page_turns_tap_zones", "default")
     if tap_zones_type == "default" then
-        local DTAP_ZONE_FORWARD = G_defaults:readSetting("DTAP_ZONE_FORWARD")
         forward_zone = {
             ratio_x = DTAP_ZONE_FORWARD.x, ratio_y = DTAP_ZONE_FORWARD.y,
             ratio_w = DTAP_ZONE_FORWARD.w, ratio_h = DTAP_ZONE_FORWARD.h,
         }
-        local DTAP_ZONE_BACKWARD = G_defaults:readSetting("DTAP_ZONE_BACKWARD")
         backward_zone = {
             ratio_x = DTAP_ZONE_BACKWARD.x, ratio_y = DTAP_ZONE_BACKWARD.y,
             ratio_w = DTAP_ZONE_BACKWARD.w, ratio_h = DTAP_ZONE_BACKWARD.h,
         }
     else -- user defined page turns tap zones
-        local tap_zone_forward_w = G_reader_settings:readSetting("page_turns_tap_zone_forward_size_ratio", G_defaults:readSetting("DTAP_ZONE_FORWARD").w)
-        local tap_zone_backward_w = G_reader_settings:readSetting("page_turns_tap_zone_backward_size_ratio", G_defaults:readSetting("DTAP_ZONE_BACKWARD").w)
+        local tap_zone_forward_w = G_reader_settings:readSetting("page_turns_tap_zone_forward_size_ratio", DTAP_ZONE_FORWARD.w)
+        local tap_zone_backward_w = G_reader_settings:readSetting("page_turns_tap_zone_backward_size_ratio", DTAP_ZONE_BACKWARD.w)
         if tap_zones_type == "left_right" then
             forward_zone = {
                 ratio_x = 1 - tap_zone_forward_w, ratio_y = 0,
@@ -1167,13 +1167,22 @@ function ReaderView:getTapZones()
                 ratio_x = 0, ratio_y = 0,
                 ratio_w = tap_zone_backward_w, ratio_h = 1,
             }
-        else
+        elseif tap_zones_type == "top_bottom" then
             forward_zone = {
                 ratio_x = 0, ratio_y = 1 - tap_zone_forward_w,
                 ratio_w = 1, ratio_h = tap_zone_forward_w,
             }
             backward_zone = {
                 ratio_x = 0, ratio_y = 0,
+                ratio_w = 1, ratio_h = tap_zone_backward_w,
+            }
+        else -- "bottom_top"
+            forward_zone = {
+                ratio_x = 0, ratio_y = 0,
+                ratio_w = 1, ratio_h = tap_zone_forward_w,
+            }
+            backward_zone = {
+                ratio_x = 0, ratio_y = 1 - tap_zone_backward_w,
                 ratio_w = 1, ratio_h = tap_zone_backward_w,
             }
         end

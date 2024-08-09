@@ -222,6 +222,10 @@ function InputDialog:init()
     if self.fullscreen or self.add_nav_bar then
         self.deny_keyboard_hiding = true
     end
+    if (Device:hasKeyboard() or Device:hasScreenKB())  and G_reader_settings:isFalse("virtual_keyboard_enabled") then
+        self.keyboard_visible = false
+        self.skip_first_show_keyboard = true
+    end
 
     -- Title & description
     self.title_bar = TitleBar:new{
@@ -336,6 +340,16 @@ function InputDialog:init()
             self._top_line_num, self._charpos = top_line_num, charpos
         end
     end
+    self.enter_callback = self.enter_callback or function()
+        for _, btn_row in ipairs(self.buttons) do
+            for _, btn in ipairs(btn_row) do
+                if btn.is_enter_default then
+                    btn.callback()
+                    return
+                end
+            end
+        end
+    end
     self._input_widget = self.inputtext_class:new{
         text = self.input,
         hint = self.input_hint,
@@ -352,18 +366,9 @@ function InputDialog:init()
         margin = self.input_margin,
         input_type = self.input_type,
         text_type = self.text_type,
-        enter_callback = self.enter_callback or function()
-            for _,btn_row in ipairs(self.buttons) do
-                for _,btn in ipairs(btn_row) do
-                    if btn.is_enter_default then
-                        btn.callback()
-                        return
-                    end
-                end
-            end
-        end,
+        enter_callback = not self.allow_newline and self.enter_callback,
         strike_callback = self.strike_callback,
-        edit_callback = self._buttons_edit_callback, -- nil if no Save/Close buttons
+        edit_callback = self._buttons_edit_callback or self.edited_callback, -- self._buttons_edit_callback is nil if no Save/Close buttons
         scroll_callback = self._buttons_scroll_callback, -- nil if no Nav or Scroll buttons
         scroll = true,
         scroll_by_pan = self.scroll_by_pan,
@@ -375,9 +380,6 @@ function InputDialog:init()
         charpos = self._charpos,
     }
     table.insert(self.layout[1], self._input_widget)
-    if self.allow_newline then -- remove any enter_callback
-        self._input_widget.enter_callback = nil
-    end
     self:mergeLayoutInVertical(self.button_table)
     self:refocusWidget()
     -- Complementary setup for some of our added buttons
@@ -452,7 +454,7 @@ function InputDialog:init()
         end
     end
 
-    -- If we're fullscreen without a keyboard, make sure only the toggle button can show the keyboard...
+    -- If we're fullscreen without the virtual keyboard, make sure only the toggle button can bring back the keyboard...
     if self.fullscreen and not self.keyboard_visible then
         self:lockKeyboard(true)
     end
@@ -544,6 +546,11 @@ function InputDialog:isTextEdited()
     return self._input_widget:isTextEdited()
 end
 
+function InputDialog:setAllowNewline(allow)
+    self.allow_newline = allow
+    self._input_widget.enter_callback = not allow and self.enter_callback
+end
+
 function InputDialog:onShow()
     UIManager:setDirty(self, function()
         return "ui", self.dialog_frame.dimen
@@ -558,6 +565,11 @@ function InputDialog:onCloseWidget()
 end
 
 function InputDialog:onShowKeyboard(ignore_first_hold_release)
+    -- Don't initiate virtual keyboard when user has a physical keyboard and G_setting(vk_enabled) unchecked.
+    if self.skip_first_show_keyboard then
+        self.skip_first_show_keyboard = nil
+        return
+    end
     -- NOTE: There's no VirtualKeyboard widget instantiated at all when readonly,
     --       and our input widget handles that itself, so we don't need any guards here.
     --       (In which case, isKeyboardVisible will return `nil`, same as if we had a VK instantiated but *never* shown).
@@ -577,6 +589,10 @@ function InputDialog:isKeyboardVisible()
 end
 
 function InputDialog:lockKeyboard(toggle)
+    if (Device:hasKeyboard() or Device:hasScreenKB()) and G_reader_settings:isFalse("virtual_keyboard_enabled") then
+        -- do not lock the virtual keyboard when user is hiding it, we still *might* want to activate it via shortcuts ("Shift" + "Home") when in need of special characters or symbols
+        return
+    end
     return self._input_widget:lockKeyboard(toggle)
 end
 
@@ -734,7 +750,7 @@ function InputDialog:_addSaveCloseButtons()
             self:refreshButtons()
         end
         if self.edited_callback then
-            self.edited_callback()
+            self.edited_callback(edited)
         end
     end
     if self.reset_callback then

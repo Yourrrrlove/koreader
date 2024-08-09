@@ -44,7 +44,7 @@ local ReaderLink = require("apps/reader/modules/readerlink")
 local ReaderMenu = require("apps/reader/modules/readermenu")
 local ReaderPageMap = require("apps/reader/modules/readerpagemap")
 local ReaderPanning = require("apps/reader/modules/readerpanning")
-local ReaderRotation = require("apps/reader/modules/readerrotation")
+--local ReaderRotation = require("apps/reader/modules/readerrotation")
 local ReaderPaging = require("apps/reader/modules/readerpaging")
 local ReaderRolling = require("apps/reader/modules/readerrolling")
 local ReaderSearch = require("apps/reader/modules/readersearch")
@@ -160,12 +160,15 @@ function ReaderUI:init()
         view = self.view,
         ui = self
     })
-    -- rotation controller
+    -- (legacy, and defunct) rotation controller
+    --- @fixme: Tripping this would break rendering, c.f., `Document:renderPage`
+    --[[
     self:registerModule("rotation", ReaderRotation:new{
         dialog = self.dialog,
         view = self.view,
         ui = self
     })
+    --]]
     -- Handmade/custom ToC and hidden flows
     self:registerModule("handmade", ReaderHandMade:new{
         dialog = self.dialog,
@@ -890,7 +893,7 @@ function ReaderUI:reloadDocument(after_close_callback, seamless)
     self:showReader(file, provider, seamless)
 end
 
-function ReaderUI:switchDocument(new_file)
+function ReaderUI:switchDocument(new_file, seamless)
     if not new_file then return end
 
     -- Mimic onShowingReader's refresh optimizations
@@ -902,7 +905,7 @@ function ReaderUI:switchDocument(new_file)
     self.highlight:onClose() -- close highlight dialog if any
     self:onClose(false)
 
-    self:showReader(new_file)
+    self:showReader(new_file, nil, seamless)
 end
 
 function ReaderUI:onOpenLastDoc()

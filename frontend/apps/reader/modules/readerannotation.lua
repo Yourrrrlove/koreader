@@ -16,7 +16,8 @@ function ReaderAnnotation:buildAnnotation(bm, highlights, init)
         note = nil
     end
     local chapter = bm.chapter
-    local hl, pageno = self:getHighlightByDatetime(highlights, bm.datetime)
+    local hl, pageno = self:getHighlightForBookmark(highlights, bm)
+    local pageref
     if init then
         if note and self.ui.bookmark:isBookmarkAutoText(bm) then
             note = nil
@@ -24,14 +25,19 @@ function ReaderAnnotation:buildAnnotation(bm, highlights, init)
         if chapter == nil then
             chapter = self.ui.toc:getTocTitleByPage(bm.page)
         end
-        pageno = self.ui.paging and bm.page or self.document:getPageFromXPointer(bm.page)
+        if self.ui.rolling then
+            pageno = self.document:getPageFromXPointer(bm.page)
+            pageref = self:getPageRef(bm.page, pageno)
+        else
+            pageno = bm.page
+        end
     end
     if self.ui.paging and bm.pos0 and not bm.pos0.page then
         -- old single-page reflow highlights do not have page in position
         bm.pos0.page = bm.page
         bm.pos1.page = bm.page
     end
-    if not hl then -- page bookmark or orphaned bookmark
+    if hl == nil then -- page bookmark or orphaned bookmark
         hl = {}
         if bm.highlighted then -- orphaned bookmark
             hl.drawer = self.view.highlight.saved_drawer
@@ -53,7 +59,8 @@ function ReaderAnnotation:buildAnnotation(bm, highlights, init)
         text_edited = hl.edited,   -- true if highlighted text has been edited
         note        = note,        -- user's note, editable
         chapter     = chapter,     -- book chapter title
-        pageno      = pageno,      -- book page number
+        pageno      = pageno,      -- book page number (continuous numbering, used by KOHighlights)
+        pageref     = pageref,     -- book page number (iff: reference pages or hidden flows)
         page        = bm.page,     -- highlight location, xPointer or number (pdf)
         pos0        = bm.pos0,     -- highlight start position, xPointer (== page) or table (pdf)
         pos1        = bm.pos1,     -- highlight end position, xPointer or table (pdf)
@@ -62,10 +69,12 @@ function ReaderAnnotation:buildAnnotation(bm, highlights, init)
     }
 end
 
-function ReaderAnnotation:getHighlightByDatetime(highlights, datetime)
+function ReaderAnnotation:getHighlightForBookmark(highlights, bookmark)
+    if not bookmark.highlighted then return end -- page bookmark
+    local doesMatch = self:getMatchFunc()
     for pageno, page_highlights in pairs(highlights) do
         for _, highlight in ipairs(page_highlights) do
-            if highlight.datetime == datetime then
+            if doesMatch(highlight, bookmark) then
                 return highlight, pageno
             end
         end
@@ -113,10 +122,10 @@ function ReaderAnnotation:onReadSettings(config)
         if needs_update or needs_sort then
             if self.ui.rolling then
                 self.ui:registerPostInitCallback(function()
-                    self:updatedAnnotations(needs_update, needs_sort)
+                    self:updateAnnotations(needs_update, needs_sort)
                 end)
             else
-                self:updatedAnnotations(needs_update, needs_sort)
+                self:updateAnnotations(needs_update, needs_sort)
             end
             config:delSetting("annotations_externally_modified")
         end
@@ -225,10 +234,12 @@ end
 
 -- items handling
 
-function ReaderAnnotation:updatePageNumbers()
-    if self.needs_update and self.ui.rolling then -- triggered by ReaderRolling on document layout change
+function ReaderAnnotation:updatePageNumbers(force_update)
+    if self.ui.paging then return end
+    if force_update or self.needs_update then -- triggered by ReaderRolling on document layout change
         for _, item in ipairs(self.annotations) do
             item.pageno = self.document:getPageFromXPointer(item.page)
+            item.pageref = self:getPageRef(item.page, item.pageno)
         end
     end
     self.needs_update = nil
@@ -242,7 +253,7 @@ function ReaderAnnotation:sortItems(items)
     end
 end
 
-function ReaderAnnotation:updatedAnnotations(needs_update, needs_sort)
+function ReaderAnnotation:updateAnnotations(needs_update, needs_sort)
     if needs_update then
         self.needs_update = true
         self:updatePageNumbers()
@@ -264,30 +275,31 @@ function ReaderAnnotation:updateItemByXPointer(item)
     end
     item.chapter = chapter
     item.pageno = self.document:getPageFromXPointer(item.page)
+    item.pageref = self:getPageRef(item.page, item.pageno)
 end
 
 function ReaderAnnotation:isItemInPositionOrderRolling(a, b)
     local a_page = self.document:getPageFromXPointer(a.page)
     local b_page = self.document:getPageFromXPointer(b.page)
     if a_page == b_page then -- both items in the same page
-        if a.drawer and b.drawer then -- both items are highlights, compare positions
-            local compare_xp = self.document:compareXPointers(a.page, b.page)
-            if compare_xp then
-                if compare_xp == 0 then -- both highlights with the same start, compare ends
-                    compare_xp = self.document:compareXPointers(a.pos1, b.pos1)
-                    if compare_xp then
-                        return compare_xp > 0
-                    end
-                    logger.warn("Invalid xpointer in highlight:", a.pos1, b.pos1)
-                    return true
-                end
-                return compare_xp > 0
-            end
-            -- if compare_xp is nil, some xpointer is invalid and "a" will be sorted first to page 1
-            logger.warn("Invalid xpointer in highlight:", a.page, b.page)
-            return true
+        if (not a.drawer) ~= (not b.drawer) then -- comparing a page bookmark and a highlight
+            return not a.drawer -- have page bookmarks before highlights
         end
-        return not a.drawer -- have page bookmarks before highlights
+        local compare_xp = self.document:compareXPointers(a.page, b.page)
+        if compare_xp then
+            if a.drawer and compare_xp == 0 then -- both highlights with the same start, compare ends
+                compare_xp = self.document:compareXPointers(a.pos1, b.pos1)
+                if compare_xp then
+                    return compare_xp > 0
+                end
+                logger.warn("Invalid xpointer in highlight:", a.pos1, b.pos1)
+                return true
+            end
+            return compare_xp > 0
+        end
+        -- if compare_xp is nil, some xpointer is invalid and "a" will be sorted first to page 1
+        logger.warn("Invalid xpointer in highlight:", a.page, b.page)
+        return true
     end
     return a_page < b_page
 end
@@ -324,31 +336,35 @@ function ReaderAnnotation:isItemInPositionOrderPaging(a, b)
     return a.page < b.page
 end
 
-function ReaderAnnotation:getItemIndex(item, no_binary)
+function ReaderAnnotation:getMatchFunc()
     local doesMatch
-    if item.datetime then
+    if self.ui.rolling then
         doesMatch = function(a, b)
-            return a.datetime == b.datetime
+            if (a.datetime ~= nil and b.datetime ~= nil and a.datetime ~= b.datetime)
+                    or (not a.drawer) ~= (not b.drawer)
+                    or a.page ~= b.page
+                    or a.pos1 ~= b.pos1 then
+                return false
+            end
+            return true
         end
     else
-        if self.ui.rolling then
-            doesMatch = function(a, b)
-                if a.text ~= b.text or a.pos0 ~= b.pos0 or a.pos1 ~= b.pos1 then
-                    return false
-                end
-                return true
+        doesMatch = function(a, b)
+            if (a.datetime ~= nil and b.datetime ~= nil and a.datetime ~= b.datetime)
+                    or (not a.drawer) ~= (not b.drawer)
+                    or a.page ~= b.page
+                    or (a.pos0 and (a.pos0.x ~= b.pos0.x or a.pos1.x ~= b.pos1.x
+                                 or a.pos0.y ~= b.pos0.y or a.pos1.y ~= b.pos1.y)) then
+                return false
             end
-        else
-            doesMatch = function(a, b)
-                if a.text ~= b.text or a.pos0.page ~= b.pos0.page
-                                    or a.pos0.x ~= b.pos0.x or a.pos1.x ~= b.pos1.x
-                                    or a.pos0.y ~= b.pos0.y or a.pos1.y ~= b.pos1.y then
-                    return false
-                end
-                return true
-            end
+            return true
         end
     end
+    return doesMatch
+end
+
+function ReaderAnnotation:getItemIndex(item, no_binary)
+    local doesMatch = self:getMatchFunc()
 
     if not no_binary then
         local isInOrder = self.ui.rolling and self.isItemInPositionOrderRolling or self.isItemInPositionOrderPaging
@@ -389,13 +405,32 @@ end
 
 function ReaderAnnotation:addItem(item)
     item.datetime = os.date("%Y-%m-%d %H:%M:%S")
-    item.pageno = self.ui.paging and item.page or self.document:getPageFromXPointer(item.page)
+    if self.ui.rolling then
+        item.pageno = self.document:getPageFromXPointer(item.page)
+        item.pageref = self:getPageRef(item.page, item.pageno)
+    else
+        item.pageno = item.page
+    end
     local index = self:getInsertionIndex(item)
     table.insert(self.annotations, index, item)
     return index
 end
 
 -- info
+
+function ReaderAnnotation:getPageRef(xp, pn) -- same as ReaderBookmark:getBookmarkPageString()
+    local pageref
+    if self.ui.pagemap:wantsPageLabels() then
+        pageref = self.ui.pagemap:getXPointerPageLabel(xp, true)
+    elseif self.ui.document:hasHiddenFlows() then
+        pageref = tostring(self.ui.document:getPageNumberInFlow(pn))
+        local flow = self.ui.document:getPageFlow(pn)
+        if flow > 0 then
+            pageref = T("[%1]%2", pageref, flow)
+        end
+    end
+    return pageref
+end
 
 function ReaderAnnotation:hasAnnotations()
     return #self.annotations > 0

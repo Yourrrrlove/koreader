@@ -266,16 +266,22 @@ function Document:getPageNumberInFlow(page)
     return page
 end
 
--- calculates page dimensions
-function Document:getPageDimensions(pageno, zoom, rotation)
-    local native_dimen = self:getNativePageDimensions(pageno):copy()
+-- Transform a given rect according to the specified zoom & rotation
+function Document:transformRect(native_rect, zoom, rotation)
+    local rect = native_rect:copy()
     if rotation == 90 or rotation == 270 then
         -- switch orientation
-        native_dimen.w, native_dimen.h = native_dimen.h, native_dimen.w
+        rect.w, rect.h = rect.h, rect.w
     end
     -- Apply the zoom factor, and round to integer in a sensible manner
-    native_dimen:transformByScale(zoom)
-    return native_dimen
+    rect:transformByScale(zoom)
+    return rect
+end
+
+-- Ditto, but we get the input rect from the full page dimensions for a given page number
+function Document:getPageDimensions(pageno, zoom, rotation)
+    local native_rect = self:getNativePageDimensions(pageno)
+    return self:transformRect(native_rect, zoom, rotation)
 end
 
 function Document:getPageBBox(pageno)
@@ -387,14 +393,6 @@ function Document:updateColorRendering()
     end
 end
 
-function Document:preRenderPage()
-    return nil
-end
-
-function Document:postRenderPage()
-    return nil
-end
-
 function Document:getTileCacheValidity()
     return self.tile_cache_validity_ts
 end
@@ -407,19 +405,39 @@ function Document:resetTileCacheValidity()
     self.tile_cache_validity_ts = os.time()
 end
 
-function Document:getFullPageHash(pageno, zoom, rotation, gamma, render_mode, color)
+function Document:getFullPageHash(pageno, zoom, rotation, gamma)
     return "renderpg|"..self.file.."|"..self.mod_time.."|"..pageno.."|"
-                    ..zoom.."|"..rotation.."|"..gamma.."|"..render_mode..(color and "|color" or "")
+                    ..zoom.."|"
+                    ..rotation.."|"..gamma.."|"..self.render_mode..(self.render_color and "|color" or "|bw")
                     ..(self.reflowable_font_size and "|"..self.reflowable_font_size or "")
 end
 
-function Document:renderPage(pageno, rect, zoom, rotation, gamma, render_mode, hinting)
-    local hash_excerpt
-    local hash = self:getFullPageHash(pageno, zoom, rotation, gamma, render_mode, self.render_color)
-    local tile = DocCache:check(hash, TileCacheItem)
-    if not tile then
-        hash_excerpt = hash.."|"..tostring(rect)
-        tile = DocCache:check(hash_excerpt)
+function Document:getPagePartHash(pageno, zoom, rotation, gamma, rect)
+    return "renderpgpart|"..self.file.."|"..self.mod_time.."|"..pageno.."|"
+                    ..tostring(rect).."|"..zoom.."|"..tostring(rect.scaled_rect).."|"
+                    ..rotation.."|"..gamma.."|"..self.render_mode..(self.render_color and "|color" or "|bw")
+                    ..(self.reflowable_font_size and "|"..self.reflowable_font_size or "")
+end
+
+function Document:renderPage(pageno, rect, zoom, rotation, gamma, hinting)
+    -- If rect contains a nested scaled_rect object, our caller handled scaling itself (e.g., drawPagePart)
+    local is_prescaled = rect and rect.scaled_rect ~= nil or false
+
+    local hash, hash_excerpt, tile
+    if is_prescaled then
+        hash = self:getPagePartHash(pageno, zoom, rotation, gamma, rect)
+
+        tile = DocCache:check(hash, TileCacheItem)
+    else
+        hash = self:getFullPageHash(pageno, zoom, rotation, gamma)
+
+        tile = DocCache:check(hash, TileCacheItem)
+
+        -- In the is_prescaled branch above, we're *already* only rendering part of the page
+        if not tile and rect then
+            hash_excerpt = hash.."|"..tostring(rect)
+            tile = DocCache:check(hash_excerpt)
+        end
     end
     if tile then
         if self.tile_cache_validity_ts then
@@ -435,32 +453,39 @@ function Document:renderPage(pageno, rect, zoom, rotation, gamma, render_mode, h
     if hinting then
         CanvasContext:enableCPUCores(2)
     end
-    self:preRenderPage()
 
     local page_size = self:getPageDimensions(pageno, zoom, rotation)
-    -- this will be the size we actually render
-    local size = page_size
-    -- we prefer to render the full page, if it fits into cache
-    if not DocCache:willAccept(size.w * size.h * (self.render_color and 4 or 1) + 512) then
-        -- whole page won't fit into cache
-        logger.dbg("rendering only part of the page")
-        --- @todo figure out how to better segment the page
-        if not rect then
-            logger.warn("aborting, since we do not have a specification for that part")
-            -- required part not given, so abort
-            if hinting then
-                CanvasContext:enableCPUCores(1)
+
+    -- This will be the actual render size (i.e., the BB's dimensions)
+    local size
+    if is_prescaled then
+        -- Our caller already handled the scaling, honor it.
+        -- And we don't particulalry care whether DocCache will be able to cache it in RAM, so no need to double-check.
+        size = rect.scaled_rect
+    else
+        -- We prefer to render the full page, if it fits into cache...
+        size = page_size
+        if not DocCache:willAccept(size.w * size.h * (self.render_color and 4 or 1) + 512) then
+            -- ...and if it doesn't...
+            logger.dbg("Attempting to render only part of the page:", rect)
+            --- @todo figure out how to better segment the page
+            if not rect then
+                logger.warn("No render region was specified, we won't render the page at all!")
+                -- no rect specified, abort
+                if hinting then
+                    CanvasContext:enableCPUCores(1)
+                end
+                return
             end
-            return
+            -- ...only render the requested rect
+            hash = hash_excerpt
+            size = rect
         end
-        -- only render required part
-        hash = hash_excerpt
-        size = rect
     end
 
-    -- prepare cache item with contained blitbuffer
+    -- Prepare our BB, and wrap it in a cache item for DocCache
     tile = TileCacheItem:new{
-        persistent = true,
+        persistent = not is_prescaled, -- we don't want to dump page fragments to disk (unnecessary, and it would confuse DocCache's heuristics)
         doc_path = self.file,
         created_ts = os.time(),
         excerpt = size,
@@ -469,11 +494,16 @@ function Document:renderPage(pageno, rect, zoom, rotation, gamma, render_mode, h
     }
     tile.size = tonumber(tile.bb.stride) * tile.bb.h + 512 -- estimation
 
-    -- create a draw context
+    -- We need a draw context
     local dc = DrawContext.new()
 
     dc:setRotate(rotation)
-    -- correction of rotation
+    -- Make the context match the rotation,
+    -- by pointing at the rotated origin via coordinates offsets.
+    -- NOTE: We rotate our *Screen* bb on rotation (SetRotationMode), not the document,
+    --       so we hardly ever exercize this codepath...
+    --       AFAICT, the only thing that will *ever* (attempt to) rotate the document is ReaderRotation's key bindings (RotationUpdate).
+    --- @fixme: And whaddayano, it's broken ;). The aptly named key binds in question are J/K, I shit you not.
     if rotation == 90 then
         dc:setOffset(page_size.w, 0)
     elseif rotation == 180 then
@@ -487,13 +517,12 @@ function Document:renderPage(pageno, rect, zoom, rotation, gamma, render_mode, h
         dc:setGamma(gamma)
     end
 
-    -- render
+    -- And finally, render the page in our BB
     local page = self._document:openPage(pageno)
-    page:draw(dc, tile.bb, size.x, size.y, render_mode)
+    page:draw(dc, tile.bb, size.x, size.y, self.render_mode)
     page:close()
     DocCache:insert(hash, tile)
 
-    self:postRenderPage()
     if hinting then
         CanvasContext:enableCPUCores(1)
     end
@@ -502,9 +531,9 @@ end
 
 -- a hint for the cache engine to paint a full page to the cache
 --- @todo this should trigger a background operation
-function Document:hintPage(pageno, zoom, rotation, gamma, render_mode)
+function Document:hintPage(pageno, zoom, rotation, gamma)
     logger.dbg("hinting page", pageno)
-    self:renderPage(pageno, nil, zoom, rotation, gamma, render_mode, true)
+    self:renderPage(pageno, nil, zoom, rotation, gamma, true)
 end
 
 --[[
@@ -515,8 +544,8 @@ Draw page content to blitbuffer.
 @target: target blitbuffer
 @rect: visible_area inside document page
 --]]
-function Document:drawPage(target, x, y, rect, pageno, zoom, rotation, gamma, render_mode)
-    local tile = self:renderPage(pageno, rect, zoom, rotation, gamma, render_mode)
+function Document:drawPage(target, x, y, rect, pageno, zoom, rotation, gamma)
+    local tile = self:renderPage(pageno, rect, zoom, rotation, gamma)
     -- Enable SW dithering if requested (only available in koptoptions)
     if self.sw_dithering then
         target:ditherblitFrom(tile.bb,
@@ -539,20 +568,25 @@ function Document:getDrawnImagesStatistics()
     return self._drawn_images_count, self._drawn_images_surface_ratio
 end
 
-function Document:getPagePart(pageno, rect, rotation)
+function Document:drawPagePart(pageno, native_rect, rotation)
+    -- native_rect is straight from base, so not a Geom
+    local rect = Geom:new(native_rect)
+
     local canvas_size = CanvasContext:getSize()
-    local zoom = math.min(canvas_size.w*2 / rect.w, canvas_size.h*2 / rect.h)
-    -- it's really, really important to do math.floor, otherwise we get image projection
-    local scaled_rect = {
-        x = math.floor(rect.x * zoom),
-        y = math.floor(rect.y * zoom),
-        w = math.floor(rect.w * zoom),
-        h = math.floor(rect.h * zoom),
-    }
-    local tile = self:renderPage(pageno, scaled_rect, zoom, rotation, 1, 0)
-    local target = Blitbuffer.new(scaled_rect.w, scaled_rect.h, self.render_color and self.color_bb_type or nil)
-    target:blitFrom(tile.bb, 0, 0, scaled_rect.x, scaled_rect.y, scaled_rect.w, scaled_rect.h)
-    return target
+    -- Compute a zoom in order to scale to best fit, so that ImageViewer doesn't have to rescale further.
+    -- Optionally, based on ImageViewer settings, we'll auto-rotate for the best resolution.
+    local rotate = false
+    if G_reader_settings:isTrue("imageviewer_rotate_auto_for_best_fit") then
+        rotate = (canvas_size.w > canvas_size.h) ~= (rect.w > rect.h)
+    end
+    local zoom = rotate and math.min(canvas_size.w / rect.h, canvas_size.h / rect.w) or math.min(canvas_size.w / rect.w, canvas_size.h / rect.h)
+    local scaled_rect = self:transformRect(rect, zoom, rotation)
+    -- Stuff it inside rect so renderPage knows we're handling scaling ourselves
+    rect.scaled_rect = scaled_rect
+
+    -- Enable SMP via the hinting flag
+    local tile = self:renderPage(pageno, rect, zoom, rotation, 1.0, true)
+    return tile.bb, rotate
 end
 
 function Document:getPageText(pageno)

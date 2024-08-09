@@ -1214,7 +1214,7 @@ function ReaderHighlight:_resetHoldTimer(clear)
         self.long_hold_reached_action = function()
             self.long_hold_reached = true
             -- Have ReaderView redraw and refresh ReaderFlipping and our state icon, avoiding flashes
-            UIManager:setDirty(self.dialog, "ui", self.view.flipping.dimen)
+            UIManager:setDirty(self.dialog, "ui", self.view.flipping:getRefreshRegion())
         end
     end
     -- Unschedule if already set
@@ -1251,7 +1251,7 @@ function ReaderHighlight:_resetHoldTimer(clear)
     if self.long_hold_reached then
         self.long_hold_reached = false
         -- Have ReaderView redraw and refresh ReaderFlipping with our state icon removed
-        UIManager:setDirty(self.dialog, "ui", self.view.flipping.dimen)
+        UIManager:setDirty(self.dialog, "ui", self.view.flipping:getRefreshRegion())
     end
 end
 
@@ -1271,14 +1271,16 @@ function ReaderHighlight:onPanelZoom(arg, ges)
     if not hold_pos then return false end -- outside page boundary
     local rect = self.ui.document:getPanelFromPage(hold_pos.page, hold_pos)
     if not rect then return false end -- panel not found, return
-    local image = self.ui.document:getPagePart(hold_pos.page, rect, 0)
+    local image, rotate = self.ui.document:drawPagePart(hold_pos.page, rect, 0)
 
     if image then
         local ImageViewer = require("ui/widget/imageviewer")
         local imgviewer = ImageViewer:new{
             image = image,
+            image_disposable = false, -- It's a TileCache item
             with_title_bar = false,
             fullscreen = true,
+            rotated = rotate,
         }
         UIManager:show(imgviewer)
         return true
@@ -1592,7 +1594,7 @@ dbg:guard(ReaderHighlight, "lookup",
 function ReaderHighlight:getSelectedWordContext(nb_words)
     if not self.selected_text then return end
     local ok, prev_context, next_context = pcall(self.ui.document.getSelectedWordContext, self.ui.document,
-                                                 self.selected_text.text, nb_words, self.selected_text.pos0, self.selected_text.pos1)
+                                                 self.selected_text.text, nb_words, self.selected_text.pos0, self.selected_text.pos1, true)
     if ok then
         return prev_context, next_context
     end
